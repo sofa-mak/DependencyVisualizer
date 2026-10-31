@@ -23,37 +23,31 @@ def get_arguments():
     parser.add_argument("-a", "--ascii", action="store_true", help="Вывод в виде ASCII-дерева")
     parser.add_argument("-d", "--depth", type=int, default=3, help="Максимальная глубина")
     parser.add_argument("-f", "--filter", type=str, default="", help="Подстрока для фильтрации")
+    # НОВЫЙ ПАРАМЕТР: Режим вывода порядка загрузки
+    parser.add_argument("-l", "--load-order", action="store_true", help="Вывод порядка загрузки зависимостей")
     return parser.parse_args()
 
 # ФУНКЦИЯ: Парсит тестовый файл (режим -t)
 def parse_test_file(filepath):
-    # Создаем пустой словарь, где ключ - пакет, значение - список его зависимостей
     graph = {}
-    # Открываем файл с тестом
     with open(filepath, 'r', encoding='utf-8') as f:
-        # Читаем файл построчно
         for line in f:
-            line = line.strip() # Убираем пробелы по краям
-            # Если строка пустая, пропускаем
+            line = line.strip()
             if not line: continue
-            
-            # Разделяем строку по двоеточию: "A: B, C" -> левая часть "A", правая "B, C"
             parts = line.split(':')
             if len(parts) == 2:
-                pkg = parts[0].strip() # Имя текущего пакета
-                # Если справа есть зависимости, разделяем их по запятой
+                pkg = parts[0].strip()
                 deps = [d.strip() for d in parts[1].split(',') if d.strip()]
-                graph[pkg] = deps # Записываем в словарь
+                graph[pkg] = deps
             else:
-                # Если двоеточия нет, значит у пакета нет зависимостей
                 graph[line] = []
     return graph
 
-# ФУНКЦИЯ: Скачивает POM-файл и достает из него прямые зависимости (с подстановкой версий)
+# ФУНКЦИЯ: Скачивает POM-файл и достает из него прямые зависимости
 def get_maven_dependencies(package_name, repo_url):
     parts = package_name.split(':')
     if len(parts) != 3:
-        return [] # Если формат неверный, возвращаем пустоту
+        return []
     
     group_id, artifact_id, version = parts 
     group_path = group_id.replace('.', '/')
@@ -64,21 +58,18 @@ def get_maven_dependencies(package_name, repo_url):
         ssl_context = ssl._create_unverified_context()
         with urllib.request.urlopen(pom_url, context=ssl_context) as response:
             xml_data = response.read()
-    except Exception as e:
-        return [] # Если не скачалось, значит зависимостей нет или пакет битый
+    except Exception:
+        return []
 
     try:
         tree = ET.fromstring(xml_data)
-        # Убираем скобки из тегов
         for elem in tree.iter():
             if '}' in elem.tag:
                 elem.tag = elem.tag.split('}')[1]
         
-        # Ищем блок properties (там хранятся переменные вроде hamcrestVersion)
         properties = {}
         props_node = tree.find('properties')
         if props_node is not None:
-            # Записываем все переменные в словарь
             for prop in props_node:
                 properties[prop.tag] = prop.text
                 
@@ -92,14 +83,11 @@ def get_maven_dependencies(package_name, repo_url):
             
             if g is not None and a is not None and v is not None:
                 ver_str = v.text
-                # Если версия выглядит как ${...}, пытаемся найти её в properties
                 if ver_str and ver_str.startswith('${') and ver_str.endswith('}'):
-                    var_name = ver_str[2:-1] # Отрезаем ${ и }
-                    # Если нашли такую переменную, подставляем её значение
+                    var_name = ver_str[2:-1]
                     if var_name in properties:
                         ver_str = properties[var_name]
                 
-                # Если версия все еще с ${ или None, значит мы не смогли её узнать, пропускаем
                 if ver_str and not ver_str.startswith('${'):
                     result.append(f"{g.text}:{a.text}:{ver_str}")
                 
@@ -107,65 +95,77 @@ def get_maven_dependencies(package_name, repo_url):
     except Exception:
         return []
 
-# ГЛАВНАЯ ФУНКЦИЯ ЭТАПА 3: Строит граф с помощью BFS (поиск в ширину)
+# ФУНКЦИЯ: Строит граф с помощью BFS
 def build_graph(start_package, url, max_depth, filter_str, test_mode):
-    # Если тестовый режим, читаем граф из файла
     if test_mode:
-        # Проверяем, существует ли файл
         if not os.path.exists(url):
             print(f"Ошибка: Тестовый файл '{url}' не найден.")
             return {}
-        print(f"Загружаем тестовый граф из файла: {url}")
         full_test_graph = parse_test_file(url)
     
-    # Создаем словарь для нашего итогового графа
     graph = {}
-    # Очередь для BFS. Кладут туда пары: (Имя пакета, Текущая глубина)
     queue = deque([(start_package, 0)])
-    # Множество (set) для уже посещенных пакетов, чтобы не зациклиться
     visited = set()
 
-    # Пока в очереди есть элементы
     while queue:
-        # Достаем из очереди первый элемент (слева)
         current_pkg, current_depth = queue.popleft()
-        
-        # Если мы уже обработали этот пакет, пропускаем его (защита от циклов)
-        if current_pkg in visited:
-            continue
-            
-        # Добавляем пакет в посещенные
+        if current_pkg in visited: continue
         visited.add(current_pkg)
         
-        # Если пакет содержит подстроку фильтра (и фильтр не пустой), не идем вглубь
         if filter_str and filter_str in current_pkg:
-            graph[current_pkg] = [] # Записываем пакет, но без зависимостей
+            graph[current_pkg] = []
             continue
             
-        # Создаем пустой список зависимостей для этого пакета в графе
         graph[current_pkg] = []
-        
-        # Если достигли максимальной глубины, то зависимости не ищем
-        if current_depth >= max_depth:
-            continue
+        if current_depth >= max_depth: continue
             
-        # Получаем зависимости (из теста или из Maven)
         if test_mode:
             deps = full_test_graph.get(current_pkg, [])
         else:
             deps = get_maven_dependencies(current_pkg, url)
             
-        # Проходимся по всем найденным зависимостям
         for dep in deps:
-            # Добавляем зависимость в граф
             graph[current_pkg].append(dep)
-            # Если мы ее еще не посещали, добавляем в очередь для дальнейшего анализа
             if dep not in visited:
                 queue.append((dep, current_depth + 1))
 
     return graph
 
-# ФУНКЦИЯ: Красиво печатает граф в виде обычного текста
+# НОВАЯ ФУНКЦИЯ (ЭТАП 4): Порядок загрузки (Топологическая сортировка)
+def get_load_order(graph, start_package):
+    visited = set() # Пакеты, которые мы уже полностью обработали
+    stack = []      # Сюда будем складывать пакеты в правильном порядке (зависимости первыми)
+    cycle_nodes = set() # Пакеты, которые мы сейчас проверяем (для поиска циклов)
+
+    # Внутренняя рекурсивная функция для обхода в глубину (DFS)
+    def dfs(node):
+        # Если пакет уже в стеке загрузки, пропускаем
+        if node in visited:
+            return
+        # Если мы встретили пакет, который уже есть в текущей цепочке, значит это ЦИКЛ!
+        if node in cycle_nodes:
+            print(f"[!] Внимание: Обнаружен цикл с участием '{node}'. Цикл будет разорван для сортировки.")
+            return
+
+        # Помечаем пакет как "в процессе обработки"
+        cycle_nodes.add(node)
+        
+        # Сначала обходим всех его "детей" (зависимости)
+        for dep in graph.get(node, []):
+            dfs(dep)
+            
+        # Когда все зависимости обработаны, убираем пакет из "в процессе"
+        cycle_nodes.remove(node)
+        # И добавляем его в итоговый стек загрузки
+        visited.add(node)
+        stack.append(node)
+
+    # Запускаем обход с нашего главного пакета
+    dfs(start_package)
+    # Так как мы добавляли пакеты после их зависимостей, стек заполнился правильно
+    return stack
+
+# ФУНКЦИЯ: Красиво печатает граф
 def print_graph(graph):
     print("\n--- ГРАФ ЗАВИСИМОСТЕЙ ---")
     for pkg, deps in graph.items():
@@ -190,13 +190,23 @@ def main():
     print(f"Глубина: {args.depth}")
     print(f"Фильтр: '{args.filter}'")
     print(f"Тестовый режим: {args.test_mode}")
+    print(f"Режим загрузки: {args.load_order}")
     print("---------------------------")
 
     # Строим граф
     graph = build_graph(args.package, args.url, args.depth, args.filter, args.test_mode)
     
-    # Выводим его на экран
-    print_graph(graph)
+    # Если НЕ включен режим загрузки, просто печатаем граф
+    if not args.load_order:
+        print_graph(graph)
+    else:
+        # Если включен режим загрузки (флаг -l)
+        print("\n--- ПОРЯДОК ЗАГРУЗКИ ЗАВИСИМОСТЕЙ ---")
+        load_order = get_load_order(graph, args.package)
+        
+        # Выводим пронумерованный список
+        for i, pkg in enumerate(load_order, 1):
+            print(f"{i}. {pkg}")
 
 if __name__ == "__main__":
     main()
