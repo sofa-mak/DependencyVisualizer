@@ -6,12 +6,14 @@ import sys
 import urllib.request
 # Импортируем модуль ssl для обхода ошибки проверки сертификата на Mac
 import ssl
-# Импортируем встроенную библиотеку для работы с XML файлами (формат POM)
+# Импортируем встроенную библиотеку для работы с XML файлами
 import xml.etree.ElementTree as ET
-# Импортируем модуль для работы с очередью (нужен для BFS)
+# Импортируем модуль для работы с очередью (для BFS)
 from collections import deque
-# Импортируем модуль для работы с файлами (для тестового режима)
+# Импортируем модуль для работы с файлами
 import os
+# Импортируем библиотеку pygraphviz для создания графа и его отрисовки
+import pygraphviz as pgv
 
 # Функция для получения настроек
 def get_arguments():
@@ -23,11 +25,10 @@ def get_arguments():
     parser.add_argument("-a", "--ascii", action="store_true", help="Вывод в виде ASCII-дерева")
     parser.add_argument("-d", "--depth", type=int, default=3, help="Максимальная глубина")
     parser.add_argument("-f", "--filter", type=str, default="", help="Подстрока для фильтрации")
-    # НОВЫЙ ПАРАМЕТР: Режим вывода порядка загрузки
     parser.add_argument("-l", "--load-order", action="store_true", help="Вывод порядка загрузки зависимостей")
     return parser.parse_args()
 
-# ФУНКЦИЯ: Парсит тестовый файл (режим -t)
+# ФУНКЦИЯ: Парсит тестовый файл
 def parse_test_file(filepath):
     graph = {}
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -46,13 +47,10 @@ def parse_test_file(filepath):
 # ФУНКЦИЯ: Скачивает POM-файл и достает из него прямые зависимости
 def get_maven_dependencies(package_name, repo_url):
     parts = package_name.split(':')
-    if len(parts) != 3:
-        return []
-    
+    if len(parts) != 3: return []
     group_id, artifact_id, version = parts 
     group_path = group_id.replace('.', '/')
-    base_url = repo_url.rstrip('/')
-    pom_url = f"{base_url}/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
+    pom_url = f"{repo_url.rstrip('/')}/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.pom"
     
     try:
         ssl_context = ssl._create_unverified_context()
@@ -64,33 +62,24 @@ def get_maven_dependencies(package_name, repo_url):
     try:
         tree = ET.fromstring(xml_data)
         for elem in tree.iter():
-            if '}' in elem.tag:
-                elem.tag = elem.tag.split('}')[1]
+            if '}' in elem.tag: elem.tag = elem.tag.split('}')[1]
         
         properties = {}
         props_node = tree.find('properties')
         if props_node is not None:
-            for prop in props_node:
-                properties[prop.tag] = prop.text
+            for prop in props_node: properties[prop.tag] = prop.text
                 
         dependencies = tree.findall('.//dependency')
         result = []
-        
         for dep in dependencies:
-            g = dep.find('groupId')
-            a = dep.find('artifactId')
-            v = dep.find('version')
-            
+            g, a, v = dep.find('groupId'), dep.find('artifactId'), dep.find('version')
             if g is not None and a is not None and v is not None:
                 ver_str = v.text
                 if ver_str and ver_str.startswith('${') and ver_str.endswith('}'):
                     var_name = ver_str[2:-1]
-                    if var_name in properties:
-                        ver_str = properties[var_name]
-                
+                    if var_name in properties: ver_str = properties[var_name]
                 if ver_str and not ver_str.startswith('${'):
                     result.append(f"{g.text}:{a.text}:{ver_str}")
-                
         return result
     except Exception:
         return []
@@ -119,94 +108,107 @@ def build_graph(start_package, url, max_depth, filter_str, test_mode):
         graph[current_pkg] = []
         if current_depth >= max_depth: continue
             
-        if test_mode:
-            deps = full_test_graph.get(current_pkg, [])
-        else:
-            deps = get_maven_dependencies(current_pkg, url)
-            
+        deps = full_test_graph.get(current_pkg, []) if test_mode else get_maven_dependencies(current_pkg, url)
         for dep in deps:
             graph[current_pkg].append(dep)
             if dep not in visited:
                 queue.append((dep, current_depth + 1))
-
     return graph
 
-# НОВАЯ ФУНКЦИЯ (ЭТАП 4): Порядок загрузки (Топологическая сортировка)
+# ФУНКЦИЯ: Порядок загрузки (Топологическая сортировка)
 def get_load_order(graph, start_package):
-    visited = set() # Пакеты, которые мы уже полностью обработали
-    stack = []      # Сюда будем складывать пакеты в правильном порядке (зависимости первыми)
-    cycle_nodes = set() # Пакеты, которые мы сейчас проверяем (для поиска циклов)
+    visited, stack, cycle_nodes = set(), [], set()
 
-    # Внутренняя рекурсивная функция для обхода в глубину (DFS)
     def dfs(node):
-        # Если пакет уже в стеке загрузки, пропускаем
-        if node in visited:
-            return
-        # Если мы встретили пакет, который уже есть в текущей цепочке, значит это ЦИКЛ!
+        if node in visited: return
         if node in cycle_nodes:
-            print(f"[!] Внимание: Обнаружен цикл с участием '{node}'. Цикл будет разорван для сортировки.")
+            print(f"[!] Внимание: Обнаружен цикл с участием '{node}'. Цикл разорван.")
             return
-
-        # Помечаем пакет как "в процессе обработки"
         cycle_nodes.add(node)
-        
-        # Сначала обходим всех его "детей" (зависимости)
-        for dep in graph.get(node, []):
-            dfs(dep)
-            
-        # Когда все зависимости обработаны, убираем пакет из "в процессе"
+        for dep in graph.get(node, []): dfs(dep)
         cycle_nodes.remove(node)
-        # И добавляем его в итоговый стек загрузки
         visited.add(node)
         stack.append(node)
 
-    # Запускаем обход с нашего главного пакета
     dfs(start_package)
-    # Так как мы добавляли пакеты после их зависимостей, стек заполнился правильно
     return stack
 
-# ФУНКЦИЯ: Красиво печатает граф
-def print_graph(graph):
-    print("\n--- ГРАФ ЗАВИСИМОСТЕЙ ---")
+# ОБНОВЛЕННАЯ ФУНКЦИЯ: Рисует граф с помощью pygraphviz и сохраняет в PNG
+def render_graphviz(graph, dot_file, png_file):
+    # Создаём направленный граф с помощью pygraphviz
+    G = pgv.AGraph(strict=False, directed=True)
+    # Задаём стили для узлов и рёбер
+    G.node_attr['shape'] = 'box'
+    G.node_attr['style'] = 'filled'
+    G.node_attr['fillcolor'] = 'lightblue'
+    G.node_attr['fontname'] = 'Helvetica'
+    G.edge_attr['color'] = 'gray'
+    G.edge_attr['fontname'] = 'Helvetica'
+    
+    # Добавляем в граф все пакеты и их зависимости
     for pkg, deps in graph.items():
-        print(f"{pkg}:")
-        if deps:
-            for d in deps:
-                print(f"  -> {d}")
-        else:
-            print("  (Нет зависимостей или фильтр)")
+        G.add_node(pkg)  # Добавляем узел (пакет)
+        for dep in deps:
+            G.add_edge(pkg, dep)  # Добавляем ребро (зависимость)
+
+    # Сохраняем граф в текстовый файл .dot
+    G.write(dot_file)
+    print(f"Текстовое описание графа сохранено в {dot_file}")
+    
+    # Отрисовываем граф в PNG
+    try:
+        G.draw(png_file, prog='dot')
+        print(f"Изображение графа успешно сохранено в {png_file}")
+    except Exception as e:
+        print(f"Произошла ошибка при создании картинки: {e}")
+
+# ФУНКЦИЯ: Рисует ASCII-дерево в консоли
+def print_ascii_tree(graph, node, prefix="", is_last=True, path=None):
+    if path is None: path = []
+    if node in path:
+        print(f"{prefix}{'└── ' if is_last else '├── '}{node} (цикл)")
+        return
+    if prefix == "":
+        print(node)
+    else:
+        print(f"{prefix}{'└── ' if is_last else '├── '}{node}")
+    new_path = path + [node]
+    deps = graph.get(node, [])
+    for i, dep in enumerate(deps):
+        is_dep_last = (i == len(deps) - 1)
+        new_prefix = prefix + ("    " if is_last else "│   ")
+        print_ascii_tree(graph, dep, new_prefix, is_dep_last, new_path)
 
 # Главная функция
 def main():
     args = get_arguments()
-
     if args.depth <= 0:
         print("Ошибка: Глубина анализа должна быть больше 0.")
         sys.exit(1)
 
     print("--- НАСТРОЙКИ ПРОГРАММЫ ---")
-    print(f"Пакет: {args.package}")
-    print(f"URL/Путь: {args.url}")
-    print(f"Глубина: {args.depth}")
-    print(f"Фильтр: '{args.filter}'")
-    print(f"Тестовый режим: {args.test_mode}")
-    print(f"Режим загрузки: {args.load_order}")
+    print(f"Пакет: {args.package} | Глубина: {args.depth} | Файл: {args.output}")
     print("---------------------------")
 
-    # Строим граф
     graph = build_graph(args.package, args.url, args.depth, args.filter, args.test_mode)
     
-    # Если НЕ включен режим загрузки, просто печатаем граф
-    if not args.load_order:
-        print_graph(graph)
-    else:
-        # Если включен режим загрузки (флаг -l)
-        print("\n--- ПОРЯДОК ЗАГРУЗКИ ЗАВИСИМОСТЕЙ ---")
+    if not args.ascii and not args.load_order:
+        print("\n--- ГРАФ ЗАВИСИМОСТЕЙ ---")
+        for pkg, deps in graph.items():
+            print(f"{pkg}: {deps}")
+
+    if args.ascii:
+        print("\n--- ASCII-ДЕРЕВО ---")
+        print_ascii_tree(graph, args.package)
+
+    if args.load_order:
+        print("\n--- ПОРЯДОК ЗАГРУЗКИ ---")
         load_order = get_load_order(graph, args.package)
-        
-        # Выводим пронумерованный список
         for i, pkg in enumerate(load_order, 1):
             print(f"{i}. {pkg}")
+
+    dot_filename = args.output.replace('.png', '.dot')
+    render_graphviz(graph, dot_filename, args.output)
 
 if __name__ == "__main__":
     main()

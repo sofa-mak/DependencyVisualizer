@@ -1,0 +1,10 @@
+digraph DependencyGraph {
+    node [shape=box, style=filled, fillcolor=lightblue, fontname="Helvetica"];
+    edge [color=gray, fontname="Helvetica"];
+    "B" -> "C";
+    "B" -> "D";
+    "C" -> "A";
+    "D" -> "E";
+    "A" -> "B";
+    "A" -> "C";
+}
