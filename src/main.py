@@ -6,15 +6,17 @@ import sys
 import subprocess
 from collections import deque
 
-# Константы (защита от магических чисел)
+# Константы
 DEFAULT_DEPTH = 5
 GRAPHVIZ_COMMAND = "dot"
 MIN_DEPTH = 1
+START_DEPTH = 0
+STEP = 1
 
 def parse_arguments():
     """Парсит аргументы командной строки (Этап 1)."""
     parser = argparse.ArgumentParser(
-        description="Визуализатор графа зависимостей"
+        description="Визуализатор графа зависимостей Maven"
     )
     parser.add_argument("--package", required=True, help="Имя пакета")
     parser.add_argument("--repo-url", required=True, help="Путь к файлу")
@@ -55,13 +57,12 @@ def get_dependencies(package_name, args, mock_db):
     """Возвращает список прямых зависимостей пакета."""
     if args.test_mode:
         return mock_db.get(package_name, [])
-    # В реальности здесь был бы парсинг Maven
     return []
 
 def build_graph_bfs(args, mock_db):
     """Построение графа зависимостей алгоритмом BFS (Этап 3)."""
     print(f"--- Построение графа для: {args.package} ---")
-    queue = deque([(args.package, 0)])
+    queue = deque([(args.package, START_DEPTH)])
     visited = set()
     graph = {}
     
@@ -80,7 +81,7 @@ def build_graph_bfs(args, mock_db):
         
         for dep in deps:
             if dep not in visited:
-                queue.append((dep, current_depth + 1))
+                queue.append((dep, current_depth + STEP))
                 
     return graph
 
@@ -91,12 +92,10 @@ def print_ascii_tree(graph, package_name, indent="", path=None):
         
     print(f"{indent}- {package_name}")
     
-    # Если пакет уже есть в текущей ветке, это цикл
     if package_name in path:
         print(f"{indent}  (Обнаружен цикл)")
         return
         
-    # Добавляем текущий пакет в путь
     current_path = path + [package_name]
     
     if package_name in graph:
@@ -113,7 +112,7 @@ def generate_graphviz_code(graph):
     return "\n".join(lines)
 
 def save_image(dot_code, filename):
-    """Сохраняет изображение графа в PNG (Этап 5)."""
+    """Сохраняет изображение через Graphviz (Этап 5)."""
     try:
         process = subprocess.Popen(
             [GRAPHVIZ_COMMAND, "-Tpng", "-o", filename],
@@ -122,7 +121,11 @@ def save_image(dot_code, filename):
         process.communicate(input=dot_code)
         print(f"Изображение сохранено в файл: {filename}")
     except FileNotFoundError:
-        print("Утилита Graphviz не найдена. Пропускаем генерацию PNG.")
+        print("\n--- Утилита Graphviz не найдена ---")
+        print("Скопируйте код графа между линиями:")
+        print("--------------------КОД-ГРАФА--------------------")
+        print(dot_code)
+        print("------------------КОНЕЦ-КОДА-ГРАФА----------------")
 
 def main():
     """Главная функция программы."""
